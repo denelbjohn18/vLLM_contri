@@ -272,8 +272,15 @@ fn parameter(input: &mut &str, trim_newlines: bool) -> ModalResult<(String, Stri
         _: literal(PARAMETER_START),
         take_until(1.., ">"),
         _: ">",
-        take_until(0.., PARAMETER_END),
-        _: literal(PARAMETER_END),
+        // A missing `</parameter>` ends the value at the next `<parameter=`
+        // opener, matching the Python parser.
+        alt((
+            terminated(
+                take_until(0.., PARAMETER_END).verify(|value: &str| !value.contains(PARAMETER_START)),
+                literal(PARAMETER_END),
+            ),
+            take_until(0.., PARAMETER_START),
+        )),
     )
     .parse_next(input)?;
 
@@ -798,6 +805,29 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"tool parser parsing failed: near "\n<function=get_weather>\n<parameter=location>SF</function>\n</tool_call>": "#]].assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn qwen_coder_missing_parameter_end_ends_value_at_next_parameter() {
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(
+                "<tool_call>\n\
+                 <function=get_weather>\n\
+                 <parameter=city>\nDallas\n\
+                 <parameter=state>\nTX\n</parameter>\n\
+                 <parameter=unit>\nfahrenheit\n</parameter>\n\
+                 </function>\n\
+                 </tool_call>",
+            )
+            .unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "city": "Dallas", "state": "TX", "unit": "fahrenheit" })
+        );
     }
 
     #[test]
